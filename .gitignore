@@ -1,0 +1,29 @@
+# Android / Gradle build outputs
+.gradle/
+build/
+app/build/
+
+# Local machine and signing material
+local.properties
+*.jks
+*.keystore
+keystore.properties
+
+# Generated APKs, logs, IDE state, and local recovery data
+*.apk
+*.aab
+*.log
+*.log.err
+.idea/
+*.iml
+
+# Machine-specific build and recovery helpers are not shared through Git.
+build-android.ps1
+빌드하기.bat
+tools/recover-installed-travel-data.ps1
+
+# Travel plans, exports, and copied private images stay on each phone.
+app/src/main/assets/travel_plan.json
+exports/
+backup/
+**/images/
