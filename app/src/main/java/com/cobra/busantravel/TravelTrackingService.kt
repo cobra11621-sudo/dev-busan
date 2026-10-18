@@ -239,12 +239,15 @@ class TravelTrackingService : Service() {
     }
 
     private fun handleBus(card: TravelCard, bus: TravelBusInfo, location: Location, accuracy: Float?, speed: Float) {
-        val stops = bus.routeStops.filter { it.latitude != null && it.longitude != null }
-        if (stops.size < 2 || accuracy == null || accuracy > 80f) {
+        // A TAGO route can include the return/circuit section.  GPS must only
+        // consider the user-selected boarding-to-destination section.
+        val tripStops = selectedBusTripStops(bus.routeStops, bus)
+        val gpsStops = tripStops.filter { it.latitude != null && it.longitude != null }
+        if (gpsStops.size < 2 || accuracy == null || accuracy > 80f) {
             store.saveTrackingStatus(TravelTrackingStatus(card.id, LocalDate.now().toString(), "대기", 0, "버스 자동 탑승 확인 중"))
             return
         }
-        val projection = project(stops, location.latitude, location.longitude) ?: return
+        val projection = project(gpsStops, location.latitude, location.longitude) ?: return
         // Bus boarding criteria: a known route (two or more stops), GPS
         // accuracy within 80m, route distance within 250m, and 20km/h.
         if (projection.distance > 250.0) return
@@ -252,12 +255,26 @@ class TravelTrackingService : Service() {
         if (previous?.phase != "탑승 중" && previous?.phase != "도착") {
             if (speed < 20f) return
         }
-        val index = nearestStop(stops.map { TravelKtxStop(it.name, it.latitude!!, it.longitude!!) }, location).coerceAtLeast(0)
-        val destinationIndex = stops.indexOfFirst { it.id == bus.destinationStopId }.takeIf { it >= 0 } ?: stops.lastIndex
-        val arrived = index >= destinationIndex && speed < 5f
+        val nearestIndex = nearestStop(gpsStops.map { TravelKtxStop(it.name, it.latitude!!, it.longitude!!) }, location).coerceAtLeast(0)
+        val nearestStop = gpsStops[nearestIndex]
+        val nearestTripIndex = tripStops.indexOfFirst { it.id == nearestStop.id }.coerceAtLeast(0)
+        // GPS jitter must not make a bus appear to travel backwards.
+        val previousTripIndex = previous?.currentStopId
+            ?.takeIf(String::isNotBlank)
+            ?.let { previousId -> tripStops.indexOfFirst { it.id == previousId } }
+            ?.takeIf { it >= 0 }
+        val currentTripIndex = maxOf(nearestTripIndex, previousTripIndex ?: 0)
+        val currentStop = tripStops[currentTripIndex]
+        val fullRouteIndex = bus.routeStops.indexOfFirst { it.id == currentStop.id }.coerceAtLeast(0)
+        val arrived = currentStop.id == bus.destinationStopId && speed < 5f
         val phase = if (arrived) "도착" else "탑승 중"
-        val message = if (arrived) "버스 도착: ${bus.destinationStopName}" else "${bus.routeNumber}번 탑승 중 · 현재 ${stops[index].name} 부근"
-        store.saveTrackingStatus(TravelTrackingStatus(card.id, LocalDate.now().toString(), phase, index, message))
+        val message = if (arrived) "버스 도착: ${bus.destinationStopName}" else "${bus.routeNumber}번 탑승 중 · 현재 ${currentStop.name} 부근"
+        store.saveTrackingStatus(
+            TravelTrackingStatus(
+                card.id, LocalDate.now().toString(), phase, fullRouteIndex, message,
+                currentStop.id,
+            )
+        )
     }
 
     /** Same fixed-train timetable rule as dev-1-new: alert once at two and one stops before destination. */

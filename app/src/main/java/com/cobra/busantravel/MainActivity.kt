@@ -250,6 +250,25 @@ data class TravelBusStop(
     }
 }
 
+/**
+ * A bus route returned by TAGO can contain its whole circuit.  The travel
+ * card, however, represents only the journey the user chose.  Keep every
+ * consumer (GPS tracking and the route strip) on that exact directed slice.
+ */
+internal fun selectedBusTripStops(
+    allStops: List<TravelBusStop>,
+    bus: TravelBusInfo,
+): List<TravelBusStop> {
+    val boardingIndex = allStops.indexOfFirst { it.id == bus.boardingStopId }
+    val destinationIndex = allStops.indexOfFirst { it.id == bus.destinationStopId }
+    return if (boardingIndex >= 0 && destinationIndex >= boardingIndex) {
+        allStops.subList(boardingIndex, destinationIndex + 1)
+    } else {
+        // Keep older imported cards usable if TAGO has since changed an ID.
+        allStops
+    }
+}
+
 data class TravelKtxStop(val name: String, val latitude: Double, val longitude: Double) {
     fun json() = JSONObject().put("name", name).put("latitude", latitude).put("longitude", longitude)
     companion object {
@@ -517,13 +536,22 @@ data class TravelTrackingStatus(
     val phase: String,
     val currentStopIndex: Int,
     val message: String,
+    // KTX uses its fixed list index. Bus tracking additionally stores the
+    // stable TAGO stop ID, so an index from a GPS-only list can never point to
+    // a different row in the full display list.
+    val currentStopId: String = "",
 ) {
     fun json() = JSONObject().put("card_id", cardId).put("date", date).put("phase", phase)
         .put("current_stop", currentStopIndex).put("message", message)
+        .put("current_stop_id", currentStopId)
     companion object {
         fun from(value: String?): TravelTrackingStatus? = runCatching {
             val row = JSONObject(value.orEmpty())
-            TravelTrackingStatus(row.getString("card_id"), row.getString("date"), row.getString("phase"), row.optInt("current_stop", 0), row.optString("message"))
+            TravelTrackingStatus(
+                row.getString("card_id"), row.getString("date"), row.getString("phase"),
+                row.optInt("current_stop", 0), row.optString("message"),
+                row.optString("current_stop_id"),
+            )
         }.getOrNull()
     }
 }
@@ -1417,18 +1445,18 @@ private fun BusArrivalPanel(
                 color = Color(0xFF08675E),
             )
             Text("${bus.routeNumbers.ifEmpty { listOf(bus.routeNumber) }.joinToString(", ")}번  ${bus.boardingStopName} → ${bus.destinationStopName}", style = MaterialTheme.typography.bodyMedium)
-            if (routeStops.isNotEmpty()) {
+            val tripStops = selectedBusTripStops(routeStops, bus)
+            if (tripStops.isNotEmpty()) {
                 val routeListState = rememberLazyListState()
-                val onboardOrder = trackingStatus
-                    ?.takeIf { it.phase == "탑승 중" || it.phase == "도착" }
-                    ?.currentStopIndex
-                    ?.let { index -> routeStops.getOrNull(index)?.order }
-                val currentStop = (onboardOrder ?: currentStopOrder)?.let { order -> routeStops.minByOrNull { kotlin.math.abs(it.order - order) } }
-                val currentIndex = currentStop?.let { stop -> routeStops.indexOfFirst { it.id == stop.id } } ?: -1
-                LaunchedEffect(currentIndex) {
-                    // Keep the current (yellow) stop at the left edge so the
-                    // upcoming route remains visible to its right.
-                    if (currentIndex >= 0) routeListState.animateScrollToItem(currentIndex, scrollOffset = 0)
+                val onboardStatus = trackingStatus?.takeIf { it.phase == "탑승 중" || it.phase == "도착" }
+                val currentStop = when {
+                    !onboardStatus?.currentStopId.isNullOrBlank() ->
+                        tripStops.firstOrNull { it.id == onboardStatus?.currentStopId }
+                    onboardStatus != null -> routeStops.getOrNull(onboardStatus.currentStopIndex)
+                        ?.let { stored -> tripStops.firstOrNull { it.id == stored.id } }
+                    else -> currentStopOrder?.let { order ->
+                        tripStops.minByOrNull { kotlin.math.abs(it.order - order) }
+                    }
                 }
                 currentStop?.let { Text("현재 위치: ${it.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color(0xFF9A5A00)) }
                 LazyRow(
@@ -1437,7 +1465,10 @@ private fun BusArrivalPanel(
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    items(routeStops, key = { it.id }) { stop ->
+                    // Do not force-scroll to every new stop.  The trip starts
+                    // on the left and the current marker advances to the
+                    // right; longer routes remain manually scrollable.
+                    items(tripStops, key = { it.id }) { stop ->
                         val isCurrent = stop.order == currentStop?.order
                         val isPassed = currentStop != null && stop.order < currentStop.order
                         val isBoarding = stop.id == bus.boardingStopId
