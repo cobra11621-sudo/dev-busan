@@ -18,8 +18,14 @@ keystore.properties
 *.iml
 
 # Machine-specific build and recovery helpers are not shared through Git.
+/*.bat
+/*.cmd
 build-android.ps1
+install-android.ps1
 빌드하기.bat
+설치하기.bat
+build-install-continue.ps1
+빌드설치이어하기.bat
 tools/recover-installed-travel-data.ps1
 
 # Travel plans, exports, and copied private images stay on each phone.

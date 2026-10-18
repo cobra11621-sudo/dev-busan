@@ -33,7 +33,6 @@ class TravelTrackingService : Service() {
     private var manager: LocationManager? = null
     private var listener: LocationListener? = null
     private val handler = Handler(Looper.getMainLooper())
-    private val probes = mutableMapOf<String, BusProbe>()
     // KTX는 객차 안에서 GPS 첫 수신을 놓칠 수 있다. 사용자가 누르는 새로 고침은
     // 다음의 새 위치 수신으로 같은 자동 탑승 기준을 다시 적용하는 복구 수단이다.
     private var ktxRecoveryCardId: String? = null
@@ -66,10 +65,15 @@ class TravelTrackingService : Service() {
             }
             val needsLocation = active.any { it.allBusInfos.isNotEmpty() || it.ktxInfo != null } || ktxRecoveryCardId != null
             updateLocationSubscription(needsLocation)
-            active.forEach { card ->
-                card.allSubwayInfos.forEachIndexed { index, subway -> evaluateSubwayTimetable(card, index, subway) }
-            }
-            postNotification("이동·지하철 시간표를 확인 중")
+            val hasBus = active.any { it.allBusInfos.isNotEmpty() }
+            val hasKtx = active.any { it.ktxInfo != null }
+            postNotification(
+                when {
+                    hasBus && hasKtx -> "버스·KTX 자동 이동을 확인 중"
+                    hasKtx -> "KTX 자동 이동을 확인 중"
+                    else -> "버스 자동 탑승을 확인 중"
+                }
+            )
             handler.postDelayed(this, 20_000L)
         }
     }
@@ -106,7 +110,7 @@ class TravelTrackingService : Service() {
     private fun refreshKtxLocation(cardId: String?) {
         val card = cardId?.let { id -> store.load().cards.firstOrNull { it.id == id && it.ktxInfo != null } }
         if (card == null) return
-        val interval = cardInterval(card)
+        val interval = card.ktxInfo?.let { route -> ktxInterval(card, route) }
         if (interval == null || LocalDateTime.now() !in interval.first..interval.second) {
             store.saveTrackingStatus(
                 TravelTrackingStatus(card.id, LocalDate.now().toString(), "대기", 0, "현재 위치 새로 고침은 KTX 출발 시각부터 도착 시각 사이에 사용할 수 있습니다.")
@@ -169,7 +173,17 @@ class TravelTrackingService : Service() {
     private fun activeCards(): List<TravelCard> {
         val now = LocalDateTime.now()
         return store.load().cards.filter { card ->
-            (card.allBusInfos.isNotEmpty() || card.ktxInfo != null || card.allSubwayInfos.isNotEmpty()) && trackingWindow(card, now)
+            // Arrival is terminal for today's card: stop GPS and remove the
+            // foreground notification instead of continuing to poll it.
+            if (store.trackingStatus(card.id)?.phase == "도착") return@filter false
+
+            // Bus uses its saved travel date (but no clock requirement).
+            // KTX already includes its own card date plus KTX time window.
+            // Subway tracking stays disabled until a verified timetable source
+            // is connected.
+            val busActive = card.allBusInfos.isNotEmpty() && busTravelDateIsToday(card)
+            val ktxActive = card.ktxInfo?.let { route -> ktxTrackingWindow(card, route, now) } == true
+            busActive || ktxActive
         }
     }
 
@@ -184,7 +198,9 @@ class TravelTrackingService : Service() {
             }
         }
         cards.forEach { card ->
-            card.ktxInfo?.let { handleKtx(card, it, location, accuracy, speed, now) }
+            card.ktxInfo?.takeIf { route ->
+                ktxTrackingWindow(card, route, now) || ktxRecoveryCardId == card.id
+            }?.let { handleKtx(card, it, location, accuracy, speed, now) }
             // A card may show several alternative bus paths.  For automatic
             // tracking use the first registered path; every path still has
             // its own on-demand arrival information in the card.
@@ -193,7 +209,7 @@ class TravelTrackingService : Service() {
     }
 
     private fun handleKtx(card: TravelCard, route: TravelKtxInfo, location: Location, accuracy: Float?, speed: Float, now: LocalDateTime) {
-        val interval = cardInterval(card) ?: return
+        val interval = ktxInterval(card, route) ?: return
         val previous = store.trackingStatus(card.id)
         val onBoard = previous?.phase == "탑승 중"
         val recovering = ktxRecoveryCardId == card.id
@@ -229,22 +245,12 @@ class TravelTrackingService : Service() {
             return
         }
         val projection = project(stops, location.latitude, location.longitude) ?: return
-        // dev-1-new bus criteria: within 250 m of route, observe for at least
-        // 7 seconds, move 30 m forward/physically, and reach 10 km/h.
+        // Bus boarding criteria: a known route (two or more stops), GPS
+        // accuracy within 80m, route distance within 250m, and 20km/h.
         if (projection.distance > 250.0) return
         val previous = store.trackingStatus(card.id)
-        val nowElapsed = if (location.elapsedRealtimeNanos > 0L) location.elapsedRealtimeNanos / 1_000_000L else SystemClock.elapsedRealtime()
-        val probe = probes[card.id]
         if (previous?.phase != "탑승 중" && previous?.phase != "도착") {
-            if (probe == null) {
-                probes[card.id] = BusProbe(location.latitude, location.longitude, projection.progress, speed, nowElapsed)
-                store.saveTrackingStatus(TravelTrackingStatus(card.id, LocalDate.now().toString(), "대기", 0, "버스 자동 탑승 확인 중"))
-                return
-            }
-            val elapsed = nowElapsed - probe.elapsed
-            val moved = distance(probe.latitude, probe.longitude, location.latitude, location.longitude)
-            val forward = projection.progress - probe.progress
-            if (elapsed < 7_000L || moved < 30.0 || forward < 30.0 || maxOf(probe.speed, speed) < 10f) return
+            if (speed < 20f) return
         }
         val index = nearestStop(stops.map { TravelKtxStop(it.name, it.latitude!!, it.longitude!!) }, location).coerceAtLeast(0)
         val destinationIndex = stops.indexOfFirst { it.id == bus.destinationStopId }.takeIf { it >= 0 } ?: stops.lastIndex
@@ -321,12 +327,29 @@ class TravelTrackingService : Service() {
     }
 }
 
-private data class BusProbe(val latitude: Double, val longitude: Double, val progress: Double, val speed: Float, val elapsed: Long)
 private data class TravelProjection(val distance: Double, val progress: Double)
+
+private fun busTravelDateIsToday(card: TravelCard): Boolean =
+    runCatching { LocalDate.parse(card.sortDate) }.getOrNull() == LocalDate.now()
 
 private fun trackingWindow(card: TravelCard, now: LocalDateTime): Boolean {
     val range = cardInterval(card) ?: return false
     return now >= range.first.minusMinutes(15) && now <= range.second.plusMinutes(90)
+}
+
+private fun ktxTrackingWindow(card: TravelCard, route: TravelKtxInfo, now: LocalDateTime): Boolean {
+    val range = ktxInterval(card, route) ?: return false
+    return now >= range.first.minusMinutes(15) && now <= range.second.plusMinutes(90)
+}
+
+/** KTX tracking intentionally reads the KTX panel, never the card's general time label. */
+private fun ktxInterval(card: TravelCard, route: TravelKtxInfo): Pair<LocalDateTime, LocalDateTime>? {
+    val day = runCatching { LocalDate.parse(card.sortDate) }.getOrNull() ?: return null
+    val start = runCatching { LocalTime.parse(route.departureTime) }.getOrNull() ?: return null
+    val end = runCatching { LocalTime.parse(route.arrivalTime) }.getOrNull() ?: return null
+    val startAt = LocalDateTime.of(day, start)
+    val endAt = LocalDateTime.of(day, end).let { if (it < startAt) it.plusDays(1) else it }
+    return startAt to endAt
 }
 
 private fun cardInterval(card: TravelCard): Pair<LocalDateTime, LocalDateTime>? {

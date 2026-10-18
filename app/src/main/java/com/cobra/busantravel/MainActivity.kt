@@ -263,27 +263,61 @@ data class TravelKtxStop(val name: String, val latitude: Double, val longitude: 
     }
 }
 
-data class TravelKtxInfo(val direction: String, val stops: List<TravelKtxStop>) {
-    fun json() = JSONObject().put("direction", direction).put("stops", JSONArray().apply { stops.forEach { put(it.json()) } })
+data class TravelKtxInfo(
+    val direction: String,
+    val stops: List<TravelKtxStop>,
+    val departureStation: String = "",
+    val arrivalStation: String = "",
+    val departureTime: String = "",
+    val arrivalTime: String = "",
+    val trainNumber: String = "",
+    val seatDetails: String = "",
+) {
+    fun json() = JSONObject()
+        .put("direction", direction)
+        .put("stops", JSONArray().apply { stops.forEach { put(it.json()) } })
+        .put("departure_station", departureStation)
+        .put("arrival_station", arrivalStation)
+        .put("departure_time", departureTime)
+        .put("arrival_time", arrivalTime)
+        .put("train_number", trainNumber)
+        .put("seat_details", seatDetails)
     companion object {
         fun from(value: JSONObject?): TravelKtxInfo? {
             val row = value ?: return null
             val stops = row.optJSONArray("stops") ?: return null
             val result = List(stops.length()) { TravelKtxStop.from(stops.optJSONObject(it)) }.filterNotNull()
-            return result.takeIf { it.size >= 2 }?.let { TravelKtxInfo(row.optString("direction"), it) }
+            return result.takeIf { it.size >= 2 }?.let {
+                TravelKtxInfo(
+                    direction = row.optString("direction"),
+                    stops = it,
+                    departureStation = row.optString("departure_station", it.first().name),
+                    arrivalStation = row.optString("arrival_station", it.last().name),
+                    departureTime = row.optString("departure_time"),
+                    arrivalTime = row.optString("arrival_time"),
+                    trainNumber = row.optString("train_number"),
+                    seatDetails = row.optString("seat_details"),
+                )
+            }
         }
     }
 }
 
-private fun busanKtxRoute(toBusan: Boolean): TravelKtxInfo {
-    val forward = listOf(
-        TravelKtxStop("대전역", 36.3322, 127.4341),
-        TravelKtxStop("김천구미역", 36.1215, 128.1190),
-        TravelKtxStop("동대구역", 35.8798, 128.6283),
-        TravelKtxStop("울산역", 35.5510, 129.1380),
-        TravelKtxStop("부산역", 35.1151, 129.0412),
-    )
-    return TravelKtxInfo(if (toBusan) "대전역 → 부산역" else "부산역 → 대전역", if (toBusan) forward else forward.reversed())
+private val BUSAN_KTX_STOPS = listOf(
+    TravelKtxStop("대전역", 36.3322, 127.4341),
+    TravelKtxStop("김천구미역", 36.1215, 128.1190),
+    TravelKtxStop("동대구역", 35.8798, 128.6283),
+    TravelKtxStop("울산역", 35.5510, 129.1380),
+    TravelKtxStop("부산역", 35.1151, 129.0412),
+)
+
+private fun busanKtxRoute(departureStation: String, arrivalStation: String): TravelKtxInfo? {
+    val departure = BUSAN_KTX_STOPS.indexOfFirst { it.name == departureStation }
+    val arrival = BUSAN_KTX_STOPS.indexOfFirst { it.name == arrivalStation }
+    if (departure < 0 || arrival < 0 || departure == arrival) return null
+    val stops = if (departure < arrival) BUSAN_KTX_STOPS.subList(departure, arrival + 1)
+        else BUSAN_KTX_STOPS.subList(arrival, departure + 1).reversed()
+    return TravelKtxInfo("$departureStation → $arrivalStation", stops, departureStation, arrivalStation)
 }
 
 data class TravelSubwayInfo(
@@ -410,12 +444,23 @@ private fun travelTimeOrder(time: String): Int {
     return match.groupValues[1].toInt() * 60 + match.groupValues[2].toInt()
 }
 
-private fun cardCanBeSorted(card: TravelCard): Boolean = dateFromCard(card) != null && travelTimeOrder(card.time) != Int.MAX_VALUE
+private fun cardTimeOrder(card: TravelCard): Int {
+    // KTX cards use the dedicated KTX departure time as their source of truth.
+    val ktxDeparture = card.ktxInfo?.departureTime?.takeIf { it.isNotBlank() }
+    return travelTimeOrder(ktxDeparture ?: card.time)
+}
 
 private fun cardsInTravelOrder(cards: List<TravelCard>): List<TravelCard> {
-    val ordered = cards.filter(::cardCanBeSorted).sortedWith(compareBy<TravelCard>({ dateFromCard(it) }, { travelTimeOrder(it.time) }, { it.title }))
-    val iterator = ordered.iterator()
-    return cards.map { card -> if (cardCanBeSorted(card)) iterator.next() else card }
+    // A missing time is deliberately Int.MAX_VALUE, so the card remains at the
+    // end of its own date instead of being left at its previous list position.
+    // A missing/invalid date is placed after all dated travel cards.
+    return cards.sortedWith(
+        compareBy<TravelCard>(
+            { dateFromCard(it) ?: LocalDate.MAX },
+            ::cardTimeOrder,
+            { it.title },
+        )
+    )
 }
 
 private fun saveSummary(card: TravelCard): String = when {
@@ -463,6 +508,7 @@ private fun formatTravelTimeInput(value: String): String {
 private data class PhoneContact(val name: String, val number: String)
 private enum class ContactTarget { TITLE, DESCRIPTION }
 private enum class BusStopPicker { BOARDING, DESTINATION }
+private enum class KtxStationPicker { DEPARTURE, ARRIVAL }
 private data class BusPathCandidate(val boarding: TagoStop, val destination: TagoStop)
 
 data class TravelTrackingStatus(
@@ -955,7 +1001,7 @@ private fun BusanTravelApp(store: TravelStore) {
                         Button(onClick = { creatingCard = true }, modifier = Modifier.height(38.dp)) { Text("+ 카드") }
                         TextButton(onClick = ::undo, enabled = undoHistory.isNotEmpty(), modifier = Modifier.size(52.dp)) { Icon(Icons.Filled.Undo, contentDescription = "되돌리기", modifier = Modifier.size(42.dp)) }
                         TextButton(onClick = ::redo, enabled = redoHistory.isNotEmpty(), modifier = Modifier.size(52.dp)) { Icon(Icons.Filled.Redo, contentDescription = "원래대로", modifier = Modifier.size(42.dp)) }
-                        OutlinedButton(onClick = { update(plan.copy(cards = cardsInTravelOrder(plan.cards))); notice = "날짜·시간이 있는 카드만 날짜·시간 순으로 정렬했습니다." }, modifier = Modifier.height(38.dp)) { Text("정렬") }
+                        OutlinedButton(onClick = { update(plan.copy(cards = cardsInTravelOrder(plan.cards))); notice = "날짜·시간 순으로 정렬했습니다. 시간 없는 카드는 해당 날짜의 마지막에 둡니다." }, modifier = Modifier.height(38.dp)) { Text("정렬") }
                         TextButton(onClick = {
                             notice = "여행 전체 캡처를 만드는 중…"
                             store.shareFullPlanImage(
@@ -1060,8 +1106,10 @@ private fun BusanTravelApp(store: TravelStore) {
         store = store,
         onDismiss = { creatingCard = false },
         onSave = { saved ->
-            update(plan.copy(cards = cardsInTravelOrder(plan.cards + saved)))
-            notice = saveSummary(saved)
+            // New cards stay at the bottom in the order they were entered.
+            // Date/time sorting is an explicit action through the Sort button.
+            update(plan.copy(cards = plan.cards + saved))
+            notice = "마지막에 카드를 추가했습니다. ${saveSummary(saved)}"
             creatingCard = false
         },
     )
@@ -1445,6 +1493,11 @@ private fun KtxRoutePanel(
     ) {
         Column(Modifier.padding(10.dp)) {
             Text("KTX 경로 · ${ktx.direction}", fontWeight = FontWeight.Bold, color = Color(0xFF5B3E76))
+            if (ktx.departureTime.isNotBlank() || ktx.arrivalTime.isNotBlank()) {
+                Text("${ktx.departureTime.ifBlank { "출발 시간 미입력" }} 출발 · ${ktx.arrivalTime.ifBlank { "도착 예정 미입력" }} 도착 예정", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (ktx.trainNumber.isNotBlank()) Text("열차: ${ktx.trainNumber}", style = MaterialTheme.typography.bodyMedium)
+            if (ktx.seatDetails.isNotBlank()) Text("호차·좌석: ${ktx.seatDetails}", style = MaterialTheme.typography.bodyMedium)
             val current = status?.currentStopIndex?.coerceIn(0, ktx.stops.lastIndex)
             current?.let { Text("현재 위치: ${ktx.stops[it].name}", color = Color(0xFF795548), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold) }
             LazyRow(modifier = Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1726,7 +1779,27 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
     var title by remember(source) { mutableStateOf(source?.title ?: "") }
     var description by remember(source) { mutableStateOf(source?.description ?: "") }
     var ktxEnabled by remember(source) { mutableStateOf(source?.ktxInfo != null) }
-    var selectedKtxRoute by remember(source) { mutableStateOf(source?.ktxInfo) }
+    var ktxDepartureStation by remember(source) {
+        mutableStateOf(source?.ktxInfo?.let { info ->
+            info.departureStation.ifBlank { info.stops.firstOrNull()?.name.orEmpty() }
+        }.orEmpty())
+    }
+    var ktxArrivalStation by remember(source) {
+        mutableStateOf(source?.ktxInfo?.let { info ->
+            info.arrivalStation.ifBlank { info.stops.lastOrNull()?.name.orEmpty() }
+        }.orEmpty())
+    }
+    var ktxDepartureTime by remember(source) {
+        val initial = source?.ktxInfo?.departureTime.orEmpty()
+        mutableStateOf(TextFieldValue(initial, selection = TextRange(initial.length)))
+    }
+    var ktxArrivalTime by remember(source) {
+        val initial = source?.ktxInfo?.arrivalTime.orEmpty()
+        mutableStateOf(TextFieldValue(initial, selection = TextRange(initial.length)))
+    }
+    var ktxTrainNumber by remember(source) { mutableStateOf(source?.ktxInfo?.trainNumber.orEmpty()) }
+    var ktxSeatDetails by remember(source) { mutableStateOf(source?.ktxInfo?.seatDetails.orEmpty()) }
+    var ktxStationPicker by remember { mutableStateOf<KtxStationPicker?>(null) }
     // 기존 경로는 모두 확정된 목록으로 보관한다. 첫 경로를 새 입력칸에
     // 불러오면 다음 경로를 추가할 때 기존 경로를 덮어쓰게 된다.
     var savedSubwayPaths by remember(source) { mutableStateOf(source?.allSubwayInfos.orEmpty()) }
@@ -1770,6 +1843,13 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
         selectedCity = null; selectedRoute = null; selectedBoarding = null; selectedDestination = null
         routeNumber = ""; routeOptions = emptyList(); stopOptions = emptyList(); busPathCandidates = emptyList()
     }
+    fun currentKtxRoute(): TravelKtxInfo? =
+        busanKtxRoute(ktxDepartureStation, ktxArrivalStation)?.copy(
+            departureTime = ktxDepartureTime.text,
+            arrivalTime = ktxArrivalTime.text,
+            trainNumber = ktxTrainNumber.trim(),
+            seatDetails = ktxSeatDetails.trim(),
+        )
     fun currentSubwayPath(): TravelSubwayInfo? {
         val line = subwayLine.trim()
         val boarding = subwayBoarding.trim()
@@ -1934,7 +2014,12 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                             },
                             Modifier.weight(1f),
                             textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp),
-                            label = { Text("시간 (선택, 예: 10:00-11:10)", style = MaterialTheme.typography.bodyMedium) },
+                            label = {
+                                Text(
+                                    if (ktxEnabled) "일정 시간 (KTX 아래 입력값 사용)" else "시간 (선택, 예: 10:00-11:10)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            },
                         )
                     }
                     OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) target = ContactTarget.TITLE }, label = { Text("카드 제목") })
@@ -1967,11 +2052,61 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                             }
                             if (ktxEnabled) {
                                 Text("dev-1-new 기준으로 시간대·GPS 정확도·이동 속도를 확인해 자동 탑승 처리합니다.", color = Color(0xFF5B4B70), style = MaterialTheme.typography.bodySmall)
+                                Text("출발역 → 도착역을 선택한 뒤 운행 정보를 입력하세요.", color = Color(0xFF5B4B70), style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(
+                                    onClick = { ktxStationPicker = KtxStationPicker.DEPARTURE },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text(ktxDepartureStation.ifBlank { "1. 출발역 선택" }) }
+                                OutlinedButton(
+                                    onClick = { ktxStationPicker = KtxStationPicker.ARRIVAL },
+                                    enabled = ktxDepartureStation.isNotBlank(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text(ktxArrivalStation.ifBlank { "2. 도착역 선택" }) }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                    OutlinedButton(onClick = { selectedKtxRoute = busanKtxRoute(true) }, modifier = Modifier.weight(1f)) { Text("대전 → 부산") }
-                                    OutlinedButton(onClick = { selectedKtxRoute = busanKtxRoute(false) }, modifier = Modifier.weight(1f)) { Text("부산 → 대전") }
+                                    OutlinedTextField(
+                                        ktxDepartureTime,
+                                        { incoming ->
+                                            val formatted = formatTravelTimeInput(incoming.text).take(5)
+                                            ktxDepartureTime = TextFieldValue(formatted, selection = TextRange(formatted.length))
+                                        },
+                                        Modifier.weight(1f),
+                                        label = { Text("출발 시간") },
+                                        placeholder = { Text("10:00") },
+                                        singleLine = true,
+                                    )
+                                    OutlinedTextField(
+                                        ktxArrivalTime,
+                                        { incoming ->
+                                            val formatted = formatTravelTimeInput(incoming.text).take(5)
+                                            ktxArrivalTime = TextFieldValue(formatted, selection = TextRange(formatted.length))
+                                        },
+                                        Modifier.weight(1f),
+                                        label = { Text("도착 예정") },
+                                        placeholder = { Text("12:00") },
+                                        singleLine = true,
+                                    )
                                 }
-                                Text(selectedKtxRoute?.direction ?: "방향을 선택하세요.", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                OutlinedTextField(
+                                    ktxTrainNumber,
+                                    { ktxTrainNumber = it },
+                                    Modifier.fillMaxWidth(),
+                                    label = { Text("열차 번호") },
+                                    placeholder = { Text("예: KTX 123") },
+                                    singleLine = true,
+                                )
+                                OutlinedTextField(
+                                    ktxSeatDetails,
+                                    { ktxSeatDetails = it },
+                                    Modifier.fillMaxWidth(),
+                                    label = { Text("호차·좌석 (여러 개 자유 입력)") },
+                                    placeholder = { Text("예: 5호차 8A, 5호차 8B\n6호차 2C") },
+                                    minLines = 2,
+                                )
+                                Text(
+                                    currentKtxRoute()?.direction ?: "출발역과 도착역을 다르게 선택하세요.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                )
                             }
                         }
                     }
@@ -1984,7 +2119,7 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = subwayEnabled, onCheckedChange = { subwayEnabled = it })
-                                Text("지하철 시간표·현재 위치 표시", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.clickable { subwayEnabled = !subwayEnabled })
+                                Text("지하철 경로 메모 (자동 시간표 미지원)", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.clickable { subwayEnabled = !subwayEnabled })
                             }
                             if (subwayEnabled) {
                                 Text("부산 → 호선 → 승차역 → 하차역 순서로 입력합니다.", color = Color(0xFF42615E), style = MaterialTheme.typography.bodySmall)
@@ -2233,8 +2368,15 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                         } else if (title.isBlank()) {
                             error = "카드 제목을 입력하세요."
                         } else {
-                            val savedKtx = if (!ktxEnabled) null else selectedKtxRoute ?: run {
-                                error = "KTX 경로는 대전 → 부산 또는 부산 → 대전을 선택하세요."
+                            val savedKtx = if (!ktxEnabled) null else currentKtxRoute() ?: run {
+                                error = "KTX 출발역과 도착역을 다르게 선택하세요."
+                                return@Button
+                            }
+                            val validKtxTimes = savedKtx == null || listOf(savedKtx.departureTime, savedKtx.arrivalTime).all { value ->
+                                Regex("\\d{2}:\\d{2}").matches(value) && runCatching { java.time.LocalTime.parse(value) }.isSuccess
+                            }
+                            if (!validKtxTimes) {
+                                error = "KTX 출발 시간과 도착 예정 시간을 HH:MM 형식으로 입력하세요."
                                 return@Button
                             }
                             val savedSubways = if (!subwayEnabled) emptyList() else (savedSubwayPaths + listOfNotNull(currentSubwayPath())).takeIf { it.isNotEmpty() } ?: run {
@@ -2270,7 +2412,10 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                                 id = source?.id ?: UUID.randomUUID().toString(),
                                 day = travelDayLabel(selectedDate),
                                 sortDate = selectedDate.toString(),
-                                time = timeInput.text.trim(),
+                                // KTX 자동 탑승은 카드 시간에서 출발·도착 구간을
+                                // 읽는다. KTX 입력값을 이 필드에도 확정해 추적 기준과
+                                // 화면에 보이는 시간이 절대 어긋나지 않게 한다.
+                                time = savedKtx?.let { "${it.departureTime}–${it.arrivalTime}" } ?: timeInput.text.trim(),
                                 title = title.trim(),
                                 description = description.trim(),
                                 busInfo = savedBuses.firstOrNull(),
@@ -2287,6 +2432,27 @@ private fun CardEditorDialog(source: TravelCard?, store: TravelStore, onDismiss:
                 }
             }
         }
+    }
+    ktxStationPicker?.let { picker ->
+        val options = BUSAN_KTX_STOPS.filter { stop ->
+            picker != KtxStationPicker.ARRIVAL || stop.name != ktxDepartureStation
+        }
+        TagoChoiceDialog(
+            title = if (picker == KtxStationPicker.DEPARTURE) "1. KTX 출발역 선택" else "2. KTX 도착역 선택",
+            options = options,
+            label = { it.name },
+            hint = "현재는 대전역·김천구미역·동대구역·울산역·부산역 구간을 선택할 수 있습니다.",
+            onChoose = { stop ->
+                if (picker == KtxStationPicker.DEPARTURE) {
+                    ktxDepartureStation = stop.name
+                    if (ktxArrivalStation == stop.name) ktxArrivalStation = ""
+                } else {
+                    ktxArrivalStation = stop.name
+                }
+                ktxStationPicker = null
+            },
+            onDismiss = { ktxStationPicker = null },
+        )
     }
     if (tagoKeyDialogOpen) TagoKeyDialog(store, onDismiss = { tagoKeyDialogOpen = false }) {
         tagoKeyDialogOpen = false
