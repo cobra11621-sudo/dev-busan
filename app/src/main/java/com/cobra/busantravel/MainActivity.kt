@@ -945,12 +945,12 @@ private fun BusanTravelApp(store: TravelStore) {
     }
     fun update(next: TravelPlan) {
         if (next == plan) return
-        saveAutomaticBackupInBackground(plan)
         if (undoHistory.size == 10) undoHistory.removeAt(0)
         undoHistory += plan
         redoHistory.clear()
         plan = next
         store.save(next)
+        saveAutomaticBackupInBackground(next)
     }
     fun undo() {
         if (undoHistory.isEmpty()) return
@@ -958,6 +958,7 @@ private fun BusanTravelApp(store: TravelStore) {
         redoHistory += plan
         plan = undoHistory.removeAt(undoHistory.lastIndex)
         store.save(plan)
+        saveAutomaticBackupInBackground(plan)
         notice = "마지막 변경을 되돌렸습니다."
     }
     fun redo() {
@@ -966,6 +967,7 @@ private fun BusanTravelApp(store: TravelStore) {
         undoHistory += plan
         plan = redoHistory.removeAt(redoHistory.lastIndex)
         store.save(plan)
+        saveAutomaticBackupInBackground(plan)
         notice = "되돌린 변경을 다시 적용했습니다."
     }
     fun move(card: TravelCard, distance: Int) {
