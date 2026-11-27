@@ -1,8 +1,17 @@
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val buildMoment = ZonedDateTime.now(ZoneId.of("Asia/Seoul"))
+val timestampVersionCode =
+    ((buildMoment.year - 2000) * 366 + buildMoment.dayOfYear) * 86_400 + buildMoment.toLocalTime().toSecondOfDay()
+val timestampVersionName = buildMoment.format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss"))
 
 android {
     namespace = "com.cobra.busantravel"
@@ -12,10 +21,8 @@ android {
         applicationId = "com.cobra.busantravel"
         minSdk = 26
         targetSdk = 36
-        // Version 2 is reserved for the temporary dev-back1 recovery update.
-        // The next full travel build must be newer so it can update recovery.
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = timestampVersionCode
+        versionName = timestampVersionName
     }
 
     signingConfigs {
